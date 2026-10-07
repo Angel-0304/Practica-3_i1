@@ -6,7 +6,7 @@ Infraestructura 1
 
 **Angel Alcántara — Matrícula 2024-2356 — ITLA**
 
-Link del video: https://itlaedudo-my.sharepoint.com/:f:/g/personal/20242356_itla_edu_do/IgBIrjfN_D2pRaQ0YzuoF4zeAZHWqsh6jn8hGo0eqXDlMN4?e=uVx1wa
+🎥 **Video:** [Tarea Semana 4 (Práctica 3)](https://itlaedudo-my.sharepoint.com/:f:/g/personal/20242356_itla_edu_do/IgBIrjfN_D2pRaQ0YzuoF4zeAZHWqsh6jn8hGo0eqXDlMN4?e=yfkYvU)
 
 ## Descripción
 
@@ -15,6 +15,7 @@ Red empresarial con un FortiGate que separa a los usuarios de los servidores. Lo
 - La **VLAN 20** puede entrar a las dos páginas y administrar los servidores por SSH.
 - La **VLAN 10** solo puede entrar al Sistema de Caja. Si intenta abrir el Sistema de Inventario, el FortiGate le muestra una página de bloqueo.
 - La **DMZ** no puede iniciar conexiones hacia los usuarios.
+- La **DMZ** no tiene Internet abierto: solo puede llegar a los repositorios oficiales de Ubuntu para actualizarse.
 
 Toda la configuración del FortiGate se hizo por GUI, salvo el acceso de gestión inicial y el ajuste de MTU, que en FortiOS 6.4 solo existe por CLI.
 
@@ -34,6 +35,7 @@ Toda la configuración del FortiGate se hizo por GUI, salvo el acceso de gestió
 | PC VLAN 10 / PC VLAN 20 | Docker pnetlab/ubuntu_sv | Usuarios |
 | Web Caja / Inventario | Ubuntu Server 20.04 | Apache con HTTPS |
 | DB server | Ubuntu Server 20.04 | MariaDB |
+| Cloud0 | Red NAT de VMware | Gestión del FortiGate y salida real a Internet de la DMZ |
 
 ## Direccionamiento
 
@@ -43,7 +45,7 @@ Toda la configuración del FortiGate se hizo por GUI, salvo el acceso de gestió
 | VLAN 10 | 10.23.56.0/25 | 10.23.56.1 | DHCP .10 – .100 |
 | VLAN 20 | 10.23.57.0/25 | 10.23.57.1 | DHCP .10 – .100 |
 | DMZ (VLAN 30) | 10.23.56.128/28 | 10.23.56.129 | Caja .130, Inventario .131, DB .132 |
-| Gestión | 192.168.128.0/24 | — | FG-Empresa port3 .140 |
+| Gestión / Cloud0 | 192.168.128.0/24 | 192.168.128.2 | FG-Empresa port3 .140 |
 
 ## Políticas del FortiGate
 
@@ -53,7 +55,10 @@ Toda la configuración del FortiGate se hizo por GUI, salvo el acceso de gestió
 | 2 | V10-a-Inventario | VLAN10 → Web-Inventario | HTTP | Proxy + Web Filter: página de bloqueo |
 | 3 | V20-a-DMZ | VLAN20 → DMZ | HTTPS, SSH | Única con SSH |
 | 4 | V10-a-Caja | VLAN10 → Web-Caja | HTTPS | — |
+| 5 | DMZ-Actualizaciones | DMZ → port3 | HTTP, HTTPS, DNS | Solo `archive.ubuntu.com`, `security.ubuntu.com` y 1.1.1.1 |
 | — | Implicit Deny | any → any | ALL | Con log activado |
+
+La salida de la DMZ usa dos **Policy Routes**: la primera (*Stop Policy Routing*) mantiene el tráfico interno 10.23.0.0/16 en la tabla de rutas normal, y la segunda manda lo demás por el port3, con gateway 192.168.128.2. Se hizo así porque el ISP del laboratorio es simulado y no tiene Internet real.
 
 ## Seguridad del switch
 
@@ -74,7 +79,13 @@ Toda la configuración del FortiGate se hizo por GUI, salvo el acceso de gestió
 | SSH a los servidores | ❌ | ✅ |
 | Puerto 3306 del DB | ❌ | ❌ |
 | Ping entre VLAN 10 y 20 | ❌ | ❌ |
-| DMZ → usuarios | ❌ Bloqueado (Implicit Deny) | ❌ Bloqueado (Implicit Deny) |
+
+| Prueba desde la DMZ | Resultado |
+|---|---|
+| Ping a los PCs de las VLAN 10 y 20 | ❌ Bloqueado (Implicit Deny) |
+| `apt update` (archive / security.ubuntu.com) | ✅ |
+| `curl https://www.google.com` | ❌ Timeout |
+| `ping 8.8.8.8` | ❌ 100% de pérdida |
 
 ## Problemas encontrados
 
@@ -85,6 +96,8 @@ Toda la configuración del FortiGate se hizo por GUI, salvo el acceso de gestió
 | "Maximum number of entries has been reached" | La licencia de evaluación permite solo 5 políticas | Se combinaron políticas y se usó la Implicit Deny con log |
 | La deep-inspection no descifraba el HTTPS | La licencia de evaluación funciona con cifrado bajo (LENC) | La página de bloqueo se muestra sobre HTTP |
 | netplan rechazaba el MTU | La consola de PNETLab se comía espacios y la sangría del YAML quedaba mal | `sed` que copia la sangría de la línea `addresses` |
+| `apt update` no podía usar la política de la DMZ | La imagen de Ubuntu traía un mirror de China (`mirrors.tuna.tsinghua.edu.cn`) | Se cambiaron los repositorios a `archive.ubuntu.com` y `security.ubuntu.com` |
+| El primer `apt update` del DB no resolvía nombres | Se ejecutó antes de que el DNS nuevo terminara de cargar | Repetirlo unos segundos después del `netplan apply` |
 
 ## Running-configs
 
@@ -313,6 +326,10 @@ config system interface
         set vlanid 30
     next
 end
+config system dns
+    set primary 1.1.1.1
+    set secondary 1.0.0.1
+end
 config system dhcp server
     edit 2
         set default-gateway 10.23.56.1
@@ -344,6 +361,31 @@ config router static
         set gateway 20.24.23.1
         set device "port1"
     next
+    edit 2
+        set dst 1.1.1.1 255.255.255.255
+        set gateway 192.168.128.2
+        set device "port3"
+    next
+    edit 3
+        set dst 1.0.0.1 255.255.255.255
+        set gateway 192.168.128.2
+        set device "port3"
+    next
+end
+config router policy
+    edit 1
+        set input-device "DMZ"
+        set src "10.23.56.128/255.255.255.240"
+        set dst "10.23.0.0/255.255.0.0"
+        set action deny
+    next
+    edit 2
+        set input-device "DMZ"
+        set src "10.23.56.128/255.255.255.240"
+        set dst "0.0.0.0/0.0.0.0"
+        set gateway 192.168.128.2
+        set output-device "port3"
+    next
 end
 config firewall address
     edit "Web-Caja"
@@ -354,6 +396,17 @@ config firewall address
     next
     edit "DB-Server"
         set subnet 10.23.56.132 255.255.255.255
+    next
+    edit "Ubuntu-Archive"
+        set type fqdn
+        set fqdn "archive.ubuntu.com"
+    next
+    edit "Ubuntu-Security"
+        set type fqdn
+        set fqdn "security.ubuntu.com"
+    next
+    edit "DNS-Cloudflare"
+        set subnet 1.1.1.1 255.255.255.255
     next
 end
 config webfilter urlfilter
@@ -424,6 +477,18 @@ config firewall policy
         set service "HTTPS"
         set logtraffic all
     next
+    edit 5
+        set name "DMZ-Actualizaciones"
+        set srcintf "DMZ"
+        set dstintf "port3"
+        set srcaddr "DMZ address"
+        set dstaddr "DNS-Cloudflare" "Ubuntu-Archive" "Ubuntu-Security"
+        set action accept
+        set schedule "always"
+        set service "DNS" "HTTP" "HTTPS"
+        set logtraffic all
+        set nat enable
+    next
 end
 config log setting
     set fwpolicy-implicit-log enable
@@ -444,9 +509,23 @@ network:
     eth0:
       addresses: [10.23.56.130/28]
       mtu: 1400
+      nameservers:
+        addresses: [1.1.1.1]
       routes:
         - to: 0.0.0.0/0
           via: 10.23.56.129
+
+# /etc/apt/sources.list
+deb http://archive.ubuntu.com/ubuntu/ focal main restricted
+deb http://archive.ubuntu.com/ubuntu/ focal-updates main restricted
+deb http://archive.ubuntu.com/ubuntu/ focal universe
+deb http://archive.ubuntu.com/ubuntu/ focal-updates universe
+deb http://archive.ubuntu.com/ubuntu/ focal multiverse
+deb http://archive.ubuntu.com/ubuntu/ focal-updates multiverse
+deb http://archive.ubuntu.com/ubuntu/ focal-backports main restricted universe multiverse
+deb http://security.ubuntu.com/ubuntu focal-security main restricted
+deb http://security.ubuntu.com/ubuntu focal-security universe
+deb http://security.ubuntu.com/ubuntu focal-security multiverse
 
 # Apache: /etc/apache2/sites-available/default-ssl.conf
 SSLCertificateFile /etc/ssl/certs/lab.crt
@@ -472,9 +551,14 @@ network:
     eth0:
       addresses: [10.23.56.131/28]
       mtu: 1400
+      nameservers:
+        addresses: [1.1.1.1]
       routes:
         - to: 0.0.0.0/0
           via: 10.23.56.129
+
+# /etc/apt/sources.list
+(igual que Web Caja: archive.ubuntu.com y security.ubuntu.com)
 
 # Apache: /etc/apache2/sites-available/default-ssl.conf
 SSLCertificateFile /etc/ssl/certs/lab.crt
@@ -500,9 +584,14 @@ network:
     eth0:
       addresses: [10.23.56.132/28]
       mtu: 1400
+      nameservers:
+        addresses: [1.1.1.1]
       routes:
         - to: 0.0.0.0/0
           via: 10.23.56.129
+
+# /etc/apt/sources.list
+(igual que Web Caja: archive.ubuntu.com y security.ubuntu.com)
 
 # /etc/mysql/mariadb.conf.d/50-server.cnf
 bind-address = 0.0.0.0
@@ -520,23 +609,23 @@ PermitRootLogin no
 ```
 </details>
 
-## Pendiente
-
-- [ ] Política de salida de la DMZ solo hacia los endpoints de actualización.
-
 ## Estructura del repositorio
 
 ```
-Lab-DMZ-FortiGate-2024-2356/
+Practica-3/
 ├── README.md
 ├── documentacion/
+│   └── AngelAlcantara_20242356_P3_i1.docx
 ├── diagramas/
+│   ├── topologia-pnetlab.png
+│   └── diagrama-logico.png
 ├── imagenes/
 └── running-configs/
+    ├── AngelAlcantara_20242356_P3_i1.txt
     ├── ISP.txt
     ├── SW-Usuarios.txt
     ├── FG-Empresa.conf
     ├── Web-Caja.txt
-    ├── Inventario.txt
+    ├Inventario.txt
     └── DB-Server.txt
 ```
